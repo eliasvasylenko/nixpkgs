@@ -43,7 +43,7 @@ stdenv.mkDerivation rec {
       --prefix PATH : ${jdk}/bin \
       --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath ([ glib gtk libXtst libsecret ] ++ lib.optional (webkitgtk != null) webkitgtk)} \
       --prefix XDG_DATA_DIRS : "$GSETTINGS_SCHEMAS_PATH" \
-      --add-flags "-configuration \$HOME/.eclipse/''${productId}_$productVersion/configuration"
+      --add-flags "-configuration \$HOME/.eclipse/$(basename $out)/configuration"
 
     # Create desktop item.
     mkdir -p $out/share/applications
