@@ -40,13 +40,22 @@ let
                   hostname = certs.domain;
                 };
                 inherit initialAdminPassword;
-                sslCertificate = "${certs.${certs.domain}.cert}";
-                sslCertificateKey = "${certs.${certs.domain}.key}";
+                sslCertificate = {
+                  path = "${certs.${certs.domain}.cert}";
+                  allowStorePath = true;
+                };
+                sslCertificateKey = {
+                  path = "${certs.${certs.domain}.key}";
+                  allowStorePath = true;
+                };
                 database = {
                   type = databaseType;
                   username = "bogus";
                   name = "also bogus";
-                  passwordFile = "${pkgs.writeText "dbPassword" ''wzf6\"vO"Cb\nP>p#6;c&o?eu=q'THE'''H''''E''}";
+                  passwordFile = {
+                    path = "${pkgs.writeText "dbPassword" ''wzf6\"vO"Cb\nP>p#6;c&o?eu=q'THE'''H''''E''}";
+                    allowStorePath = true;
+                  };
                 };
                 plugins = with config.services.keycloak.package.plugins; [
                   keycloak-discord

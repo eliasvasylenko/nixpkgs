@@ -3,6 +3,7 @@
   options,
   pkgs,
   lib,
+  utils,
   ...
 }:
 
@@ -11,27 +12,26 @@ let
   opt = options.services.keycloak;
 
   inherit (lib)
-    types
-    mkMerge
-    mkOption
-    mkChangedOptionModule
-    mkRenamedOptionModule
-    mkRemovedOptionModule
-    mkPackageOption
     concatStringsSep
-    mapAttrsToList
     escapeShellArg
-    mkIf
-    optionalString
-    optionals
-    mkDefault
-    literalExpression
+    filterAttrs
+    hasPrefix
     isAttrs
+    literalExpression
     literalMD
     maintainers
-    catAttrs
-    collect
-    hasPrefix
+    mapAttrsToList
+    mkChangedOptionModule
+    mkDefault
+    mkIf
+    mkMerge
+    mkOption
+    mkPackageOption
+    mkRemovedOptionModule
+    mkRenamedOptionModule
+    optionals
+    optionalString
+    types
     ;
 
   inherit (builtins)
@@ -40,7 +40,6 @@ let
     isInt
     isString
     hashString
-    isPath
     ;
 
   prefixUnlessEmpty = prefix: string: optionalString (string != "") "${prefix}${string}";
@@ -92,18 +91,6 @@ in
         port
         listOf
         ;
-
-      assertStringPath =
-        optionName: value:
-        if isPath value then
-          throw ''
-            services.keycloak.${optionName}:
-              ${toString value}
-              is a Nix path, but should be a string, since Nix
-              paths are copied into the world-readable Nix store.
-          ''
-        else
-          value;
     in
     {
       enable = mkOption {
@@ -116,22 +103,18 @@ in
         '';
       };
 
-      sslCertificate = mkOption {
-        type = nullOr path;
-        default = null;
-        example = "/run/keys/ssl_cert";
-        apply = assertStringPath "sslCertificate";
+      sslCertificate = utils.systemdUtils.lib.mkCredentialOption {
+        nullable = true;
+        defaultName = "ssl_cert";
         description = ''
           The path to a PEM formatted certificate to use for TLS/SSL
           connections.
         '';
       };
 
-      sslCertificateKey = mkOption {
-        type = nullOr path;
-        default = null;
-        example = "/run/keys/ssl_key";
-        apply = assertStringPath "sslCertificateKey";
+      sslCertificateKey = utils.systemdUtils.lib.mkCredentialOption {
+        nullable = true;
+        defaultName = "ssl_key";
         description = ''
           The path to a PEM formatted private key to use for TLS/SSL
           connections.
@@ -257,11 +240,9 @@ in
           '';
         };
 
-        passwordFile = mkOption {
-          type = nullOr path;
-          default = null;
-          example = "/run/keys/db_password";
-          apply = assertStringPath "passwordFile";
+        passwordFile = utils.systemdUtils.lib.mkCredentialOption {
+          nullable = true;
+          defaultName = "db_password";
           description = ''
             The path to a file containing the database password.
 
@@ -325,7 +306,17 @@ in
               str
               int
               bool
-              (attrsOf path)
+              (lib.types.submodule (
+                { name, ... }:
+                {
+                  options._secret = utils.systemdUtils.lib.mkCredentialOption {
+                    defaultName = name;
+                    description = ''
+                      The path to a file containing the ${name} option.
+                    '';
+                  };
+                }
+              ))
             ])
           );
 
@@ -495,20 +486,22 @@ in
             else if false == v then
               "false"
             else if isSecret v then
-              hashString "sha256" v._secret
+              hashString "sha256" v._secret.name
             else
               throw "unsupported type ${typeOf v}: ${(lib.generators.toPretty { }) v}";
         };
       };
 
-      isSecret = v: isAttrs v && v ? _secret && isString v._secret;
-      filteredConfig = lib.converge (lib.filterAttrsRecursive (
+      isSecret = v: isAttrs v && v ? _secret;
+      filteredConfig = lib.converge (lib.filterAttrs (
         _: v:
         !elem v [
           { }
           null
         ]
       )) cfg.settings;
+
+      secretConfig = filterAttrs (k: isSecret) filteredConfig;
       confFile = pkgs.writeText "keycloak.conf" (keycloakConfig filteredConfig);
       keycloakBuild = cfg.package.override {
         inherit confFile;
@@ -612,7 +605,7 @@ in
             db = if cfg.database.type == "postgresql" then "postgres" else cfg.database.type;
             db-username = if databaseActuallyCreateLocally then "keycloak" else cfg.database.username;
             db-password = mkIf (cfg.database.passwordFile != null) {
-              _secret = cfg.database.passwordFile;
+              _secret = cfg.database.passwordFile.credentialConfig;
             };
           }
           (mkIf isUnixSocket {
@@ -641,8 +634,8 @@ in
           RemainAfterExit = true;
           User = "postgres";
           Group = "postgres";
-          LoadCredential = [ "db_password:${cfg.database.passwordFile}" ];
-        };
+        }
+        // (cfg.database.passwordFile.serviceConfig { asserted = true; });
         script = ''
           set -o errexit -o pipefail -o nounset -o errtrace
           shopt -s inherit_errexit
@@ -654,7 +647,7 @@ in
           # escape any single quotes by adding additional single
           # quotes after them, following the rules laid out here:
           # https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-CONSTANTS
-          db_password="$(<"$CREDENTIALS_DIRECTORY/db_password")"
+          db_password="$(<"$CREDENTIALS_DIRECTORY/${cfg.database.passwordFile.name}")"
           db_password="''${db_password//\'/\'\'}"
 
           echo "CREATE ROLE keycloak WITH LOGIN PASSWORD '$db_password' CREATEDB" > "$create_role"
@@ -674,8 +667,8 @@ in
           RemainAfterExit = true;
           User = config.services.mysql.user;
           Group = config.services.mysql.group;
-          LoadCredential = [ "db_password:${cfg.database.passwordFile}" ];
-        };
+        }
+        // (cfg.database.passwordFile.serviceConfig { asserted = true; });
         script = ''
           set -o errexit -o pipefail -o nounset -o errtrace
           shopt -s inherit_errexit
@@ -684,7 +677,7 @@ in
           # escape any single quotes by adding additional single
           # quotes after them, following the rules laid out here:
           # https://dev.mysql.com/doc/refman/8.0/en/string-literals.html
-          db_password="$(<"$CREDENTIALS_DIRECTORY/db_password")"
+          db_password="$(<"$CREDENTIALS_DIRECTORY/${cfg.database.passwordFile.name}")"
           db_password="''${db_password//\'/\'\'}"
 
           ( echo "SET sql_mode = 'NO_BACKSLASH_ESCAPES';"
@@ -729,11 +722,10 @@ in
               ]
             else
               [ ];
-          secretPaths = catAttrs "_secret" (collect isSecret cfg.settings);
-          mkSecretReplacement = file: ''
-            replace-secret ${hashString "sha256" file} "$CREDENTIALS_DIRECTORY/${baseNameOf file}" /run/keycloak/conf/keycloak.conf
+          mkSecretReplacement = key: credential: ''
+            replace-secret ${hashString "sha256" credential._secret.name} "$CREDENTIALS_DIRECTORY/${credential._secret.name}" /run/keycloak/conf/keycloak.conf
           '';
-          secretReplacements = lib.concatMapStrings mkSecretReplacement secretPaths;
+          secretReplacements = lib.concatStrings (mapAttrsToList mkSecretReplacement secretConfig);
         in
         {
           after = databaseServices;
@@ -752,22 +744,27 @@ in
             KC_BOOTSTRAP_ADMIN_USERNAME = "admin";
             KC_BOOTSTRAP_ADMIN_PASSWORD = cfg.initialAdminPassword;
           };
-          serviceConfig = {
-            LoadCredential =
-              map (p: "${baseNameOf p}:${p}") secretPaths
-              ++ optionals (cfg.sslCertificate != null && cfg.sslCertificateKey != null) [
-                "ssl_cert:${cfg.sslCertificate}"
-                "ssl_key:${cfg.sslCertificateKey}"
-              ];
-            User = "keycloak";
-            Group = "keycloak";
-            DynamicUser = true;
-            RuntimeDirectory = "keycloak";
-            RuntimeDirectoryMode = "0700";
-            AmbientCapabilities = "CAP_NET_BIND_SERVICE";
-            Type = "notify"; # Requires quarkus-systemd-notify plugin
-            NotifyAccess = "all";
-          };
+          serviceConfig = mkMerge (
+            (mapAttrsToList (
+              key: credential: credential._secret.serviceConfig { asserted = true; }
+            ) secretConfig)
+            ++ (optionals (cfg.sslCertificate != null && cfg.sslCertificateKey != null) [
+              (cfg.sslCertificate.serviceConfig { asserted = true; bindPath = "/run/keycloak/ssl/ssl_cert"; })
+              (cfg.sslCertificateKey.serviceConfig { asserted = true; bindPath = "/run/keycloak/ssl/ssl_key"; })
+            ])
+            ++ [
+              {
+                User = "keycloak";
+                Group = "keycloak";
+                DynamicUser = true;
+                RuntimeDirectory = "keycloak";
+                RuntimeDirectoryMode = "0700";
+                AmbientCapabilities = "CAP_NET_BIND_SERVICE";
+                Type = "notify"; # Requires quarkus-systemd-notify plugin
+                NotifyAccess = "all";
+              }
+            ]
+          );
           script = ''
             set -o errexit -o pipefail -o nounset -o errtrace
             shopt -s inherit_errexit
@@ -787,12 +784,6 @@ in
             # sequences.
             sed -i '/db-/ s|\\|\\\\|g' /run/keycloak/conf/keycloak.conf
 
-          ''
-          + optionalString (cfg.sslCertificate != null && cfg.sslCertificateKey != null) ''
-            mkdir -p /run/keycloak/ssl
-            cp "$CREDENTIALS_DIRECTORY"/ssl_{cert,key} /run/keycloak/ssl/
-          ''
-          + ''
             kc.sh --verbose start --optimized ${lib.optionalString (cfg.realmFiles != [ ]) "--import-realm"}
           '';
           enableStrictShellChecks = true;
